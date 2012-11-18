@@ -23,6 +23,7 @@ Scene::Scene(string fname)
   , vertnorm(0)
 {
     readfile(fname);
+    createBV();
 }
 
 Scene::~Scene(void)
@@ -130,12 +131,272 @@ vec3 Scene::findColor(const Intersection& hit, int depth)
     return color;
 }
 
+bool Scene::intersectBV(Ray& r, BVp bv)
+{
+    /* 
+     Fast Ray-Box Intersection
+     by Andrew Woo
+     from "Graphics Gems", Academic Press, 1990
+    */
+    const int RIGHT = 0;
+    const int LEFT = 1;
+    const int MIDDLE = 2;
+    vec3 origin(r.pos[0]/r.pos[3], r.pos[1]/r.pos[3], r.pos[2]/r.pos[3]);
+    vec3 coord; // hit point
+    bool inside = true;
+    int quadrant[3];
+    register int i;
+    int whichPlane;
+    vec3 maxT;
+    vec3 candidatePlane;
+    
+    /* Find candidate planes; this loop can be avoided if
+     * rays cast all from the eye(assume perpsective view) */
+    for (i = 0; i < 3; i++)
+    {
+        if(origin[i] < bv->lower[i])
+        {
+            quadrant[i] = LEFT;
+            candidatePlane[i] = bv->lower[i];
+            inside = false;
+        }
+        else if (origin[i] > bv->upper[i])
+        {
+            quadrant[i] = RIGHT;
+            candidatePlane[i] = bv->upper[i];
+            inside = false;
+        }
+        else
+        {
+            quadrant[i] = MIDDLE;
+        }
+    }
+    
+    /* Ray origin inside bounding box */
+    if (inside)
+    {
+        return true;
+    }
+    
+    
+    /* Calculate T distances to candidate planes */
+    for (i = 0; i < 3; i++)
+    {
+        if (quadrant[i] != MIDDLE && r.dir[i] != 0.)
+            maxT[i] = (candidatePlane[i] - origin[i]) / r.dir[i];
+        else
+            maxT[i] = -1.;
+    }
+        
+    /* Get largest of the maxT's for final choice of intersection */
+    whichPlane = 0;
+    for (i = 1; i < 3; i++)
+        if (maxT[whichPlane] < maxT[i])
+            whichPlane = i;
+        
+    /* Check final candidate actually inside box */
+    if (maxT[whichPlane] < 0.)
+        return false;
+    for (i = 0; i < 3; i++)
+    {
+        if (whichPlane != i)
+        {
+            coord[i] = origin[i] + maxT[whichPlane] * r.dir[i];
+            if (coord[i] < bv->lower[i] || coord[i] > bv->upper[i])
+                return false;
+        }
+        else
+        {
+            coord[i] = candidatePlane[i];
+        }
+    }
+    return true;      /* ray hits box */
+}
+
+
 Intersection Scene::intersect(Ray& r)
 {
     float mindist = HUGE_VALF;
     Intersection i;
     i.hasIntersection = false;
     
+//     vector<Object*> cand;
+    vector<BVp> stack;
+    stack.push_back(rootBV);
+    while (!stack.empty())
+    {
+        BVp cur = stack.back();
+        stack.pop_back();
+        
+        // check for intersection with BV
+        if (!intersectBV(r, cur))
+            continue;
+        
+        // if it's the leaf node then calculate intersection
+        if (!cur->child1 && !cur->child2)
+        {
+            Object *obj = (Object*)cur->obj;
+            switch (obj->type)
+            {
+                case tri:
+                {
+                    vec4 norm = vec4(obj->vert[3], 0.0);
+                    if (glm::dot(r.dir, norm) == 0)
+                        break;
+                    float t = (glm::dot(vec4(obj->vert[0],1.0),norm)-glm::dot(r.pos, norm))/glm::dot(r.dir, norm);
+                    if (t < r.t_min || t > r.t_max || t > mindist)
+                        break;
+                    vec4 cross4;
+                    if (!r(t, &cross4))
+                        break;
+                    vec3 cross3(cross4[0]/cross4[3],cross4[1]/cross4[3],cross4[2]/cross4[3]);
+                    if (glm::dot(glm::cross(obj->vert[1]-obj->vert[0],cross3-obj->vert[0]),obj->vert[3]) >= 0 &&
+                        glm::dot(glm::cross(obj->vert[2]-obj->vert[1],cross3-obj->vert[1]),obj->vert[3]) >= 0 &&
+                        glm::dot(glm::cross(obj->vert[0]-obj->vert[2],cross3-obj->vert[2]),obj->vert[3]) >= 0)
+                    {
+                        i.hasIntersection = true;
+                        i.n = norm;
+                        i.t = t;
+                        i.pos = vec4(cross3, 1.0);
+                        i.sourcedir = -r.dir;
+                        i.obj = obj;
+                        mindist = t;
+                    }
+                    break;
+                }
+                case trinormal:
+                {
+                    vec3 norm3 = glm::normalize(glm::cross(obj->vert_norm[1].v-obj->vert_norm[0].v,obj->vert_norm[2].v-obj->vert_norm[0].v));
+                    vec4 norm = vec4(norm3, 0.0);
+                    if (glm::dot(r.dir, norm) == 0)
+                        break;
+                    float t = (glm::dot(vec4(obj->vert_norm[0].v,1.0),norm)-glm::dot(r.pos, norm))/glm::dot(r.dir, norm);
+                    if (t < r.t_min || t > r.t_max || t > mindist)
+                        break;
+                    vec4 cross4;
+                    if (!r(t, &cross4))
+                        break;
+                    vec3 cross3(cross4[0]/cross4[3],cross4[1]/cross4[3],cross4[2]/cross4[3]);
+                    if (glm::dot(glm::cross(obj->vert_norm[1].v-obj->vert_norm[0].v,cross3-obj->vert_norm[0].v),norm3) >= 0 &&
+                        glm::dot(glm::cross(obj->vert_norm[2].v-obj->vert_norm[1].v,cross3-obj->vert_norm[1].v),norm3) >= 0 &&
+                        glm::dot(glm::cross(obj->vert_norm[0].v-obj->vert_norm[2].v,cross3-obj->vert_norm[2].v),norm3) >= 0)
+                    {
+                        i.hasIntersection = true;
+                        i.t = t;
+                        i.pos = vec4(cross3, 1.0);
+                        i.sourcedir = -r.dir;
+                        i.obj = obj;
+                        mindist = t;
+                        // interpolate normal at intersection
+                        // calculate distances^2 from intersection to choose farthest
+                        float IA = glm::dot(obj->vert_norm[0].v-cross3,obj->vert_norm[0].v-cross3);
+                        float IB = glm::dot(obj->vert_norm[1].v-cross3,obj->vert_norm[1].v-cross3);
+                        float IC = glm::dot(obj->vert_norm[2].v-cross3,obj->vert_norm[2].v-cross3);
+                        vec3 A, An; // farthest
+                        vec3 B, Bn, C, Cn; // another two
+                        if (IA >= IB && IA >= IC)
+                        {
+                            A = obj->vert_norm[0].v;
+                            B = obj->vert_norm[1].v;
+                            C = obj->vert_norm[2].v;
+                            An = obj->vert_norm[0].n;
+                            Bn = obj->vert_norm[1].n;
+                            Cn = obj->vert_norm[2].n;
+                        }
+                        else if (IB >= IA && IB >= IC)
+                        {
+                            A = obj->vert_norm[1].v;
+                            B = obj->vert_norm[2].v;
+                            C = obj->vert_norm[0].v;
+                            An = obj->vert_norm[1].n;
+                            Bn = obj->vert_norm[2].n;
+                            Cn = obj->vert_norm[0].n;
+                        }
+                        else
+                        {
+                            A = obj->vert_norm[2].v;
+                            B = obj->vert_norm[0].v;
+                            C = obj->vert_norm[1].v;
+                            An = obj->vert_norm[2].n;
+                            Bn = obj->vert_norm[0].n;
+                            Cn = obj->vert_norm[1].n;
+                        }
+                        // find Q - intersection of AI and BC
+                        Ray AI;
+                        AI.pos = vec4(A,1.0);
+                        AI.dir = vec4(cross3-A,0.0);
+                        // form normal to plane containing BC
+                        vec4 norm_aux(glm::normalize(glm::cross(glm::cross(C-B, cross3-A), C-B)),0.0);
+                        float AQ_d = (glm::dot(vec4(B,1.0),norm_aux)-glm::dot(AI.pos, norm_aux))/glm::dot(AI.dir, norm_aux);
+                        // find Q
+                        vec4 Q4;
+                        AI(AQ_d, &Q4);
+                        vec3 Q(Q4[0]/Q4[3],Q4[1]/Q4[3],Q4[2]/Q4[3]);
+                        // interpolate normal at Q
+                        float BQ_d = sqrt(glm::dot(B-Q,B-Q));
+                        float CQ_d = sqrt(glm::dot(C-Q,C-Q));
+                        float BC_d = sqrt(glm::dot(B-C,B-C));
+                        vec3 Q_norm = (Bn*CQ_d + Cn*BQ_d)/BC_d;
+                        // interpolate normal at I
+                        float AI_d = sqrt(glm::dot(A-cross3,A-cross3));
+                        float QI_d = sqrt(glm::dot(Q-cross3,Q-cross3));
+                        i.n = vec4(glm::normalize((Q_norm*AI_d + An*QI_d)/AQ_d), 0.0);
+                    }
+                    break;
+                }
+                case sphere:
+                {
+                    Ray r1 = r;
+                    r1 * glm::inverse(obj->transform);
+                    vec4 pos = obj->pos_r;
+                    float rad = pos[3];
+                    pos[3] = 1.0;
+                    float D = pow(glm::dot(r1.dir, r1.pos-pos),2) - glm::dot(r1.dir,r1.dir)*(glm::dot(r1.pos-pos,r1.pos-pos)-rad*rad);
+                    if (D < 0.)
+                        break;
+                    float t, t1, t2;
+                    t1 = (-glm::dot(r1.dir, r1.pos-pos)+sqrt(D))/glm::dot(r1.dir,r1.dir);
+                    t2 = (-glm::dot(r1.dir, r1.pos-pos)-sqrt(D))/glm::dot(r1.dir,r1.dir);
+                    if (t1 < 0)
+                        t = t2;
+                    else if (t2 < 0)
+                        t = t1;
+                    else if (t1 > t2)
+                        t = t2;
+                    else
+                        t = t1;
+                    if (t < r1.t_min || t > r1.t_max || t > mindist)
+                        break;
+                    vec4 cross4;
+                    if (!r1(t, &cross4))
+                        break;
+                    i.hasIntersection = true;
+                    // some problems with translation component
+                    i.n = glm::normalize(cross4 - pos) * glm::inverseTranspose(obj->transform);
+                    i.n[3] = 0.0;
+                    i.n = glm::normalize(i.n);
+                    i.pos = cross4 * obj->transform;
+                    i.pos[0] /= i.pos[3];
+                    i.pos[1] /= i.pos[3];
+                    i.pos[2] /= i.pos[3];
+                    i.pos[3] = 1;
+                    i.t = glm::distance(vec3(r.pos[0],r.pos[1],r.pos[2]), vec3(i.pos[0],i.pos[1],i.pos[2]));
+                    i.sourcedir = -r.dir;
+                    i.obj = obj;
+                    mindist = i.t;
+                    break;
+                }
+            }   // switch
+        }
+        else
+        {
+            if (cur->child2)
+                stack.push_back(cur->child2);
+            if (cur->child1)
+                stack.push_back(cur->child1);
+        }
+    }
+    /*
     for (vector<Object*>::const_iterator it = objs.begin(); it != objs.end(); ++it)
     {
         switch ((*it)->type)
@@ -290,6 +551,7 @@ Intersection Scene::intersect(Ray& r)
             }
         }
     }
+    */
     return i;
 }
 
@@ -714,4 +976,137 @@ bool Scene::readvals(stringstream &s, const int numvals, float *values)
         }
     }
     return true; 
+}
+
+void Scene::createBV(void )
+{
+    // create BV for every object and store in bvs
+    for (int i = 0, n = objs.size(); i < n; i++)
+    {
+        Object &obj = *objs[i];
+        obj.bv = BVp(new BoundingVolume);
+        obj.bv->obj = &obj;
+        switch (obj.type)
+        {
+            case tri:
+            {
+                vec3 min = obj.vert[0];
+                vec3 max = obj.vert[0];
+                for (int j = 1; j < 3; j++)
+                    for (int k = 0; k < 3; k++)
+                    {
+                        if (min[k] > obj.vert[j][k])
+                            min[k] = obj.vert[j][k];
+                        if (max[k] < obj.vert[j][k])
+                            max[k] = obj.vert[j][k];
+                    }
+                obj.bv->lower = min;
+                obj.bv->upper = max;
+                break;
+            }
+            case trinormal:
+            {
+                vec3 min = obj.vert_norm[0].v;
+                vec3 max = obj.vert_norm[0].v;
+                for (int j = 1; j < 3; j++)
+                    for (int k = 0; k < 3; k++)
+                    {
+                        if (min[k] > obj.vert_norm[j].v[k])
+                            min[k] = obj.vert_norm[j].v[k];
+                        if (max[k] < obj.vert_norm[j].v[k])
+                            max[k] = obj.vert_norm[j].v[k];
+                    }
+                obj.bv->lower = min;
+                obj.bv->upper = max;
+                break;
+            }
+            case sphere:
+            {
+                vec4 corn[8];
+                corn[0][0] = obj.pos_r[0] - obj.pos_r[3];
+                corn[0][1] = obj.pos_r[1] - obj.pos_r[3];
+                corn[0][2] = obj.pos_r[2] - obj.pos_r[3];
+                corn[0][3] = 1.f;
+                
+                corn[7][0] = obj.pos_r[0] + obj.pos_r[3];
+                corn[7][1] = obj.pos_r[1] + obj.pos_r[3];
+                corn[7][2] = obj.pos_r[2] + obj.pos_r[3];
+                corn[7][3] = 1.f;
+                
+                corn[1] = corn[0];
+                corn[1][0] += 2.f*obj.pos_r[3];
+                
+                corn[2] = corn[0];
+                corn[2][2] += 2.f*obj.pos_r[3];
+                
+                corn[4] = corn[0];
+                corn[4][1] += 2.f*obj.pos_r[3];
+                
+                corn[3] = corn[7];
+                corn[3][1] -= 2.f*obj.pos_r[3];
+                
+                corn[5] = corn[7];
+                corn[5][2] -= 2.f*obj.pos_r[3];
+                
+                corn[6] = corn[7];
+                corn[6][0] -= 2.f*obj.pos_r[3];
+                
+                for (int j = 0; j < 8; j++)
+                {
+                    corn[j] = corn[j] * obj.transform;
+                    corn[j][0] /= corn[j][3];
+                    corn[j][1] /= corn[j][3];
+                    corn[j][2] /= corn[j][3];
+                }
+                
+                obj.bv->lower = vec3(corn[0][0], corn[0][1], corn[0][2]);
+                obj.bv->upper = vec3(corn[0][0], corn[0][1], corn[0][2]);
+                for (int j = 1; j < 8; j++)
+                    for (int k = 0; k < 3; k++)
+                    {
+                        if (obj.bv->lower[k] > corn[j][k])
+                            obj.bv->lower[k] = corn[j][k];
+                        if (obj.bv->upper[k] < corn[j][k])
+                            obj.bv->upper[k] = corn[j][k];
+                    }
+                break;
+            }
+        }
+        bvs.push_back(obj.bv);
+    }
+    
+    // build BV tree
+    rootBV = buildBvTree(0, bvs.size(), 0);
+    
+    // DEBUG print tree
+//     vector<BVp> stack;
+//     stack.push_back(rootBV);
+//     while (!stack.empty())
+//     {
+//         BVp cur = stack.back();
+//         stack.pop_back();
+//         if (cur->child2)
+//             stack.push_back(cur->child2);
+//         if (cur->child1)
+//             stack.push_back(cur->child1);
+//         printf("\nnode %p: %p %p\n", cur.get(), cur->child1.get(), cur->child2.get());
+//     }
+}
+
+BVp Scene::buildBvTree(int start, int end, int axis)
+{
+    deque< BVp >::iterator s = bvs.begin();
+    advance(s, start);
+    if (end - start == 1)
+        return *s;
+    deque< BVp >::iterator e = bvs.begin();
+    advance(e, end);
+    BVp node = BVp(new BoundingVolume);
+    for (deque< BVp >::iterator it = s; it != e; ++it)
+        node->expand(*it);
+    BoundingVolume::sort(bvs, start, end, axis);
+    axis = (axis+1)%3;
+    node->addChild(buildBvTree(start, (start + end)/2, axis));
+    node->addChild(buildBvTree((start + end)/2, end, axis));
+    return node;
 }

@@ -5,6 +5,7 @@
 #include "Camera.h"
 #include "Ray.h"
 #include "Intersection.h"
+#include "BoundingVolume.h"
 #include "Light.h"
 #include <string>
 #include <stack>
@@ -33,6 +34,7 @@ class Scene
         vec3 specular;
         float shininess;
         mat4 transform;
+        BVp bv;
     };
     
     // Screen size
@@ -50,6 +52,8 @@ class Scene
     VertNorm *vertnorm;
     vector<Object*> objs; // objects array
     vector<Light> lights; // lights array
+    deque<BVp> bvs; // bounding volumes list
+    BVp rootBV;     // root of BV tree
     
     Scene(void);
     Scene(const Scene&);
@@ -60,7 +64,10 @@ class Scene
     bool readvals(stringstream &s, const int numvals, float *values);
     Ray getRay(int i, int j);
     Intersection intersect(Ray& r);
+    bool intersectBV(Ray& r, BVp bv);
     vec3 findColor(const Intersection& hit, int depth);
+    void createBV(void);
+    BVp buildBvTree(int start, int end, int axis);
 
 public:
     Scene(string fname);
